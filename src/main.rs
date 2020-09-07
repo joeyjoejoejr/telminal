@@ -2,99 +2,161 @@ use crossterm::{
     cursor,
     event::{self, Event, KeyCode, KeyEvent},
     execute, queue,
-    style::{self, Color, Colorize},
+    style::{self, Print},
     terminal::{self, ClearType},
-    Result,
 };
-use std::io::{stdout, Write};
+use std::error::Error;
+use std::io::{stdout, Stdout, Write};
 
-struct Container {
-    width: Option<u16>,
-    height: Option<u16>,
-    background_color: Color,
-    foreground_color: Color,
-    text: String,
+type AppResult<T> = Result<T, Box<dyn Error>>;
+
+trait ViewNode: std::fmt::Debug {
+    fn render(&self, stdout: &mut Stdout) -> AppResult<()>;
 }
 
-impl Container {
-    fn draw<W>(&self, w: &mut W) -> Result<()>
-    where
-        W: Write,
-    {
-        for row in 1..=self.height.unwrap() {
-            for column in 1..=self.width.unwrap() {
-                queue!(
-                    w,
-                    cursor::MoveTo(column, row),
-                    style::PrintStyledContent(style::style(" ").on(self.background_color)),
-                )?;
-            }
-        }
+#[derive(Debug)]
+struct View<Msg: std::fmt::Debug> {
+    child: Option<Box<dyn ViewNode>>,
+    on_key_press: Option<fn(KeyEvent) -> Msg>,
+}
 
-        queue!(
-            w,
-            cursor::MoveTo(1, 1),
-            style::PrintStyledContent(
-                style::style(&self.text)
-                    .with(self.foreground_color)
-                    .on(self.background_color)
-            ),
-        )?;
+impl<Msg> ViewNode for View<Msg>
+where
+    Msg: std::fmt::Debug,
+{
+    fn render(&self, stdout: &mut Stdout) -> AppResult<()> {
+        if let Some(ref child) = self.child {
+            child.render(stdout)?;
+        }
         Ok(())
     }
 }
 
-fn main() -> Result<()> {
-    let mut stdout = stdout();
-    let layout = Container {
-        width: Some(30),
-        height: Some(10),
-        background_color: Color::Red,
-        foreground_color: Color::Blue,
-        text: "Hello Container".to_owned(),
-    };
+#[derive(Debug)]
+struct TextView {
+    text: String,
+}
 
-    execute!(stdout, terminal::EnterAlternateScreen)?;
-    terminal::enable_raw_mode()?;
+impl ViewNode for TextView {
+    fn render(&self, stdout: &mut Stdout) -> AppResult<()> {
+        queue!(stdout, Print(&self.text)).map_err(|e| e.into())
+    }
+}
 
-    loop {
-        queue!(
-            stdout,
-            style::ResetColor,
-            terminal::Clear(ClearType::All),
-            cursor::Hide,
-            cursor::MoveTo(1, 1)
-        )?;
+type UpdateFn<Msg, Model> = fn(Msg, &Model) -> Model;
+type ViewFn<Msg, Model> = fn(&Model) -> View<Msg>;
 
-        layout.draw(&mut stdout)?;
+struct Terminal<Model, Msg>
+where
+    Msg: std::fmt::Debug,
+{
+    init: Model,
+    update: UpdateFn<Msg, Model>,
+    view: ViewFn<Msg, Model>,
+}
 
-        queue!(
-            stdout,
-            cursor::MoveTo(1, 1),
-            style::PrintStyledContent("Hello".green().on_red())
-        )?;
-        stdout.flush()?;
+impl<Model, Msg> Terminal<Model, Msg>
+where
+    Model: Clone,
+    Msg: std::fmt::Debug,
+{
+    fn new(init: Model, update: UpdateFn<Msg, Model>, view: ViewFn<Msg, Model>) -> AppResult<Self> {
+        let mut stdout = stdout();
+        execute!(stdout, terminal::EnterAlternateScreen)?;
+        terminal::enable_raw_mode()?;
 
-        let c = loop {
-            if let Ok(Event::Key(KeyEvent {
-                code: KeyCode::Char(c),
-                ..
-            })) = event::read()
-            {
-                break c;
-            }
-        };
-
-        if c == 'q' {
-            break;
-        }
+        Ok(Self { init, update, view })
     }
 
-    execute!(
-        stdout,
-        style::ResetColor,
-        cursor::Show,
-        terminal::LeaveAlternateScreen
-    )?;
-    Ok(())
+    fn run(&self) -> AppResult<()> {
+        let mut stdout = stdout();
+        let mut model = self.init.clone();
+
+        loop {
+            queue!(
+                stdout,
+                style::ResetColor,
+                terminal::Clear(ClearType::All),
+                style::SetForegroundColor(style::Color::White),
+                style::SetBackgroundColor(style::Color::Black),
+                cursor::Hide,
+                cursor::MoveTo(1, 1),
+            )?;
+
+            let view = (self.view)(&model);
+
+            view.render(&mut stdout)?;
+            stdout.flush()?;
+
+            match event::read()? {
+                Event::Key(KeyEvent {
+                    code: KeyCode::Char('q'),
+                    ..
+                }) => break Ok(()),
+                Event::Key(event) => {
+                    if let Some(key_press) = view.on_key_press {
+                        let message = (key_press)(event);
+                        model = (self.update)(message, &model);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+impl<Model, Msg> Drop for Terminal<Model, Msg>
+where
+    Msg: std::fmt::Debug,
+{
+    fn drop(&mut self) {
+        let mut stdout = stdout();
+        execute!(
+            stdout,
+            style::ResetColor,
+            cursor::Show,
+            terminal::LeaveAlternateScreen
+        )
+        .unwrap();
+    }
+}
+
+#[derive(Clone)]
+struct Model(u32);
+
+#[derive(Debug)]
+enum Msg {
+    None,
+    Increment,
+    Decrement,
+}
+
+fn update(msg: Msg, model: &Model) -> Model {
+    match msg {
+        Msg::Increment => Model(model.0 + 1),
+        Msg::Decrement => Model(model.0 - 1),
+        Msg::None => Model(model.0),
+    }
+}
+
+fn view(model: &Model) -> View<Msg> {
+    View {
+        child: Some(Box::new(TextView {
+            text: format!("{}", model.0),
+        })),
+        on_key_press: Some(|e: KeyEvent| match e {
+            KeyEvent {
+                code: KeyCode::Up, ..
+            } => Msg::Increment,
+            KeyEvent {
+                code: KeyCode::Down,
+                ..
+            } => Msg::Decrement,
+            _ => Msg::None,
+        }),
+    }
+}
+
+fn main() -> AppResult<()> {
+    Terminal::new(Model(0), update, view)?.run()
 }
