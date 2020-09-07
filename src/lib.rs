@@ -6,25 +6,48 @@ use crossterm::{
     terminal::{self, ClearType},
 };
 use std::error::Error;
+use std::fmt::Debug;
 use std::io::{stdout, Stdout, Write};
 
 pub use crossterm::event;
 
 pub type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
-pub trait ViewNode: std::fmt::Debug {
+pub trait ViewNode: Debug {
     fn render(&self, stdout: &mut Stdout) -> Result<()>;
 }
 
 #[derive(Debug)]
-pub struct View<Msg: std::fmt::Debug> {
-    pub child: Option<Box<dyn ViewNode>>,
-    pub on_key_press: Option<fn(KeyEvent) -> Msg>,
+pub struct View<Msg: Debug> {
+    child: Option<Box<dyn ViewNode>>,
+    on_key_press: Option<fn(KeyEvent) -> Msg>,
+}
+
+impl<Msg> View<Msg>
+where
+    Msg: Debug,
+{
+    pub fn new() -> Self {
+        View {
+            child: None,
+            on_key_press: None,
+        }
+    }
+
+    pub fn child<T: ViewNode + 'static>(mut self, child: T) -> Self {
+        self.child.replace(Box::new(child));
+        self
+    }
+
+    pub fn on_key_press(mut self, cb: fn(KeyEvent) -> Msg) -> Self {
+        self.on_key_press.replace(cb);
+        self
+    }
 }
 
 impl<Msg> ViewNode for View<Msg>
 where
-    Msg: std::fmt::Debug,
+    Msg: Debug,
 {
     fn render(&self, stdout: &mut Stdout) -> Result<()> {
         if let Some(ref child) = self.child {
@@ -39,6 +62,12 @@ pub struct TextView {
     pub text: String,
 }
 
+impl TextView {
+    pub fn new(text: String) -> Self {
+        Self { text }
+    }
+}
+
 impl ViewNode for TextView {
     fn render(&self, stdout: &mut Stdout) -> Result<()> {
         queue!(stdout, Print(&self.text)).map_err(|e| e.into())
@@ -50,7 +79,7 @@ type ViewFn<Msg, Model> = fn(&Model) -> View<Msg>;
 
 pub struct Terminal<Model, Msg>
 where
-    Msg: std::fmt::Debug,
+    Msg: Debug,
 {
     init: Model,
     update: UpdateFn<Msg, Model>,
@@ -60,7 +89,7 @@ where
 impl<Model, Msg> Terminal<Model, Msg>
 where
     Model: Clone,
-    Msg: std::fmt::Debug,
+    Msg: Debug,
 {
     pub fn new(
         init: Model,
@@ -83,8 +112,6 @@ where
                 stdout,
                 style::ResetColor,
                 terminal::Clear(ClearType::All),
-                style::SetForegroundColor(style::Color::White),
-                style::SetBackgroundColor(style::Color::Black),
                 cursor::Hide,
                 cursor::MoveTo(1, 1),
             )?;
@@ -113,7 +140,7 @@ where
 
 impl<Model, Msg> Drop for Terminal<Model, Msg>
 where
-    Msg: std::fmt::Debug,
+    Msg: Debug,
 {
     fn drop(&mut self) {
         let mut stdout = stdout();

@@ -22,11 +22,9 @@ fn update(msg: Msg, model: &Model) -> Model {
 }
 
 fn view(model: &Model) -> View<Msg> {
-    View {
-        child: Some(Box::new(TextView {
-            text: format!("{}", model.0),
-        })),
-        on_key_press: Some(|e: KeyEvent| match e {
+    View::new()
+        .child(TextView::new(format!("{}", model.0)))
+        .on_key_press(|e| match e {
             KeyEvent {
                 code: KeyCode::Up, ..
             } => Msg::Increment,
@@ -35,8 +33,7 @@ fn view(model: &Model) -> View<Msg> {
                 ..
             } => Msg::Decrement,
             _ => Msg::None,
-        }),
-    }
+        })
 }
 
 fn main() -> Result<()> {
