@@ -5,22 +5,45 @@ use crossterm::{
     style::{self, Print},
     terminal::{self, ClearType},
 };
+use std::cell::{RefCell, RefMut};
 use std::error::Error;
 use std::fmt::Debug;
 use std::io::{stdout, Stdout, Write};
 
 pub use crossterm::event;
+pub use crossterm::style::Color;
 
 pub type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
 pub trait ViewNode: Debug {
     fn render(&self, stdout: &mut Stdout) -> Result<()>;
+    fn style(&self) -> Style {
+        Style::default()
+    }
+
+    fn apply_style(&self, stdout: &mut Stdout) {
+        let style = self.style();
+        if let Some(color) = style.color {
+            queue!(stdout, style::SetForegroundColor(color)).unwrap();
+        }
+
+        if let Some(color) = style.background_color {
+            queue!(stdout, style::SetForegroundColor(color)).unwrap();
+        }
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct Style {
+    pub color: Option<Color>,
+    pub background_color: Option<Color>,
 }
 
 #[derive(Debug)]
 pub struct View<Msg: Debug> {
     child: Option<Box<dyn ViewNode>>,
     on_key_press: Option<fn(KeyEvent) -> Msg>,
+    style: Style,
 }
 
 impl<Msg> View<Msg>
@@ -31,6 +54,7 @@ where
         View {
             child: None,
             on_key_press: None,
+            style: Style::default(),
         }
     }
 
@@ -43,6 +67,11 @@ where
         self.on_key_press.replace(cb);
         self
     }
+
+    pub fn style(mut self, style: Style) -> Self {
+        self.style = style;
+        self
+    }
 }
 
 impl<Msg> ViewNode for View<Msg>
@@ -50,10 +79,16 @@ where
     Msg: Debug,
 {
     fn render(&self, stdout: &mut Stdout) -> Result<()> {
+        self.apply_style(stdout);
+
         if let Some(ref child) = self.child {
             child.render(stdout)?;
         }
         Ok(())
+    }
+
+    fn style(&self) -> Style {
+        self.style
     }
 }
 
@@ -84,6 +119,7 @@ where
     init: Model,
     update: UpdateFn<Msg, Model>,
     view: ViewFn<Msg, Model>,
+    stdout: RefCell<Stdout>,
 }
 
 impl<Model, Msg> Terminal<Model, Msg>
@@ -100,16 +136,20 @@ where
         execute!(stdout, terminal::EnterAlternateScreen)?;
         terminal::enable_raw_mode()?;
 
-        Ok(Self { init, update, view })
+        Ok(Self {
+            init,
+            update,
+            view,
+            stdout: RefCell::new(stdout),
+        })
     }
 
     pub fn run(&self) -> Result<()> {
-        let mut stdout = stdout();
         let mut model = self.init.clone();
 
         loop {
             queue!(
-                stdout,
+                self.stdout(),
                 style::ResetColor,
                 terminal::Clear(ClearType::All),
                 cursor::Hide,
@@ -118,8 +158,8 @@ where
 
             let view = (self.view)(&model);
 
-            view.render(&mut stdout)?;
-            stdout.flush()?;
+            view.render(&mut *self.stdout())?;
+            self.stdout().flush()?;
 
             match event::read()? {
                 Event::Key(KeyEvent {
@@ -135,6 +175,10 @@ where
                 _ => {}
             }
         }
+    }
+
+    fn stdout(&self) -> RefMut<Stdout> {
+        self.stdout.borrow_mut()
     }
 }
 

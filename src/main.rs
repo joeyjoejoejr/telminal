@@ -1,6 +1,6 @@
 use telminal::{
     event::{KeyCode, KeyEvent},
-    Result, Terminal, TextView, View,
+    Color, Result, Style, Terminal, TextView, View,
 };
 
 #[derive(Clone)]
@@ -23,6 +23,11 @@ fn update(msg: Msg, model: &Model) -> Model {
 
 fn view(model: &Model) -> View<Msg> {
     View::new()
+        .style(Style {
+            color: Some(Color::Red),
+            background_color: Some(Color::Blue),
+            ..Default::default()
+        })
         .child(TextView::new(format!("{}", model.0)))
         .on_key_press(|e| match e {
             KeyEvent {
