@@ -16,20 +16,21 @@ pub use crossterm::style::Color;
 pub type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
 pub trait ViewNode: Debug {
-    fn render(&self, stdout: &mut Stdout) -> Result<()>;
+    fn render(&self, stdout: &mut Vec<u8>, bounds: &Bounds) -> Result<()>;
     fn style(&self) -> Style {
         Style::default()
     }
 
-    fn apply_style(&self, stdout: &mut Stdout) {
+    fn apply_style(&self, stdout: &mut Vec<u8>) -> Result<()> {
         let style = self.style();
         if let Some(color) = style.color {
-            queue!(stdout, style::SetForegroundColor(color)).unwrap();
+            queue!(stdout, style::SetForegroundColor(color))?;
         }
 
         if let Some(color) = style.background_color {
-            queue!(stdout, style::SetForegroundColor(color)).unwrap();
+            queue!(stdout, style::SetBackgroundColor(color))?;
         }
+        Ok(())
     }
 }
 
@@ -37,6 +38,12 @@ pub trait ViewNode: Debug {
 pub struct Style {
     pub color: Option<Color>,
     pub background_color: Option<Color>,
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct Bounds {
+    origin: (u16, u16),
+    size: (u16, u16),
 }
 
 #[derive(Debug)]
@@ -78,11 +85,26 @@ impl<Msg> ViewNode for View<Msg>
 where
     Msg: Debug,
 {
-    fn render(&self, stdout: &mut Stdout) -> Result<()> {
-        self.apply_style(stdout);
+    fn render(&self, stdout: &mut Vec<u8>, bounds: &Bounds) -> Result<()> {
+        self.apply_style(stdout)?;
+
+        queue!(stdout, cursor::MoveTo(bounds.origin.0, bounds.origin.1))?;
+
+        for y in 0..bounds.size.1 {
+            let line = std::iter::repeat(" ")
+                .take(bounds.size.0 as usize)
+                .collect::<String>();
+            queue!(
+                stdout,
+                cursor::MoveTo(bounds.origin.0, bounds.origin.1 + y),
+                Print(line),
+            )?;
+        }
+
+        queue!(stdout, cursor::MoveTo(bounds.origin.0, bounds.origin.1))?;
 
         if let Some(ref child) = self.child {
-            child.render(stdout)?;
+            child.render(stdout, bounds)?;
         }
         Ok(())
     }
@@ -104,8 +126,37 @@ impl TextView {
 }
 
 impl ViewNode for TextView {
-    fn render(&self, stdout: &mut Stdout) -> Result<()> {
+    fn render(&self, stdout: &mut Vec<u8>, _: &Bounds) -> Result<()> {
         queue!(stdout, Print(&self.text)).map_err(|e| e.into())
+    }
+}
+
+#[derive(Debug)]
+pub struct RowView {
+    children: Vec<Box<dyn ViewNode>>,
+}
+
+impl RowView {
+    pub fn new(children: Vec<Box<dyn ViewNode>>) -> Self {
+        Self { children }
+    }
+}
+
+impl ViewNode for RowView {
+    fn render(&self, stdout: &mut Vec<u8>, bounds: &Bounds) -> Result<()> {
+        let len = self.children.len();
+        let offset = bounds.size.0 / len as u16;
+
+        for (i, child) in self.children.iter().enumerate() {
+            let mut origin = bounds.origin;
+            let mut size = bounds.size;
+            origin.0 = offset * i as u16;
+            size.0 = size.0 - offset * i as u16;
+            let child_bounds = Bounds { origin, size };
+            child.render(stdout, &child_bounds)?;
+        }
+
+        Ok(())
     }
 }
 
@@ -119,7 +170,8 @@ where
     init: Model,
     update: UpdateFn<Msg, Model>,
     view: ViewFn<Msg, Model>,
-    stdout: RefCell<Stdout>,
+    size: (u16, u16),
+    buffer: RefCell<Vec<u8>>,
 }
 
 impl<Model, Msg> Terminal<Model, Msg>
@@ -135,21 +187,25 @@ where
         let mut stdout = stdout();
         execute!(stdout, terminal::EnterAlternateScreen)?;
         terminal::enable_raw_mode()?;
+        let size = terminal::size()?;
+        let buffer: Vec<u8> = vec![];
 
         Ok(Self {
             init,
             update,
             view,
-            stdout: RefCell::new(stdout),
+            size,
+            buffer: RefCell::new(buffer),
         })
     }
 
     pub fn run(&self) -> Result<()> {
+        let mut stdout = stdout();
         let mut model = self.init.clone();
 
         loop {
             queue!(
-                self.stdout(),
+                stdout,
                 style::ResetColor,
                 terminal::Clear(ClearType::All),
                 cursor::Hide,
@@ -158,8 +214,16 @@ where
 
             let view = (self.view)(&model);
 
-            view.render(&mut *self.stdout())?;
+            view.render(
+                &mut *self.stdout(),
+                &Bounds {
+                    origin: (0, 0),
+                    size: self.size,
+                },
+            )?;
             self.stdout().flush()?;
+            let mut slice = &*&self.stdout()[..];
+            std::io::copy(&mut slice, &mut stdout)?;
 
             match event::read()? {
                 Event::Key(KeyEvent {
@@ -177,8 +241,8 @@ where
         }
     }
 
-    fn stdout(&self) -> RefMut<Stdout> {
-        self.stdout.borrow_mut()
+    fn stdout(&self) -> RefMut<Vec<u8>> {
+        self.buffer.borrow_mut()
     }
 }
 
