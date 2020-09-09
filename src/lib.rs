@@ -15,6 +15,46 @@ pub use crossterm::style::Color;
 
 pub type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
+pub struct ScreenBuffer {
+    width: usize,
+    height: usize,
+    data: Vec<Character>,
+}
+
+impl std::ops::Index<(usize, usize)> for ScreenBuffer {
+    type Output = Character;
+
+    fn index(&self, idx: (usize, usize)) -> &Self::Output {
+        let (col, row) = idx;
+        assert!(col < self.width);
+        assert!(row < self.height);
+        &self.data[row * self.width + col]
+    }
+}
+
+impl std::ops::IndexMut<(usize, usize)> for ScreenBuffer {
+    fn index_mut(&mut self, idx: (usize, usize)) -> &mut Self::Output {
+        let (col, row) = idx;
+        assert!(col < self.width);
+        assert!(row < self.height);
+        &mut self.data[row * self.width + col]
+    }
+}
+
+impl ScreenBuffer {
+    pub fn new(width: usize, height: usize, default: Character) -> Self {
+        Self {
+            width,
+            height,
+            data: vec![default; width * height],
+        }
+    }
+
+    pub fn iter(&self) -> std::slice::Iter<Character> {
+        self.data.iter()
+    }
+}
+
 #[derive(Debug, Eq, PartialEq, Clone)]
 pub struct Character {
     foreground_color: Color,
@@ -33,7 +73,7 @@ impl Default for Character {
 }
 
 pub trait ViewNode: Debug {
-    fn render(&self, stdout: &mut Vec<Vec<Character>>, bounds: &Bounds) -> Result<()>;
+    fn render(&self, stdout: &mut ScreenBuffer, bounds: &Bounds) -> Result<()>;
     fn style(&self) -> Style {
         Style::default()
     }
@@ -90,7 +130,7 @@ impl<Msg> ViewNode for View<Msg>
 where
     Msg: Debug,
 {
-    fn render(&self, stdout: &mut Vec<Vec<Character>>, bounds: &Bounds) -> Result<()> {
+    fn render(&self, stdout: &mut ScreenBuffer, bounds: &Bounds) -> Result<()> {
         let foreground_color = self.style.color;
         let background_color = self.style.background_color;
         let (origin_x, origin_y) = bounds.origin;
@@ -98,7 +138,7 @@ where
 
         for y in origin_y..origin_y + size_y {
             for x in origin_x..origin_x + size_x {
-                let character = &mut stdout[y as usize][x as usize];
+                let character = &mut stdout[(x as usize, y as usize)];
                 foreground_color.map(|c| character.foreground_color = c);
                 background_color.map(|c| character.background_color = c);
                 character.character = String::from(" ");
@@ -128,11 +168,11 @@ impl TextView {
 }
 
 impl ViewNode for TextView {
-    fn render(&self, stdout: &mut Vec<Vec<Character>>, bounds: &Bounds) -> Result<()> {
+    fn render(&self, stdout: &mut ScreenBuffer, bounds: &Bounds) -> Result<()> {
         let (x, y) = bounds.origin;
 
         for (i, char) in self.text.graphemes(true).enumerate() {
-            let character = &mut stdout[y as usize][x as usize + i];
+            let character = &mut stdout[(x as usize + i, y as usize)];
             character.character = String::from(char);
         }
         Ok(())
@@ -151,7 +191,7 @@ impl RowView {
 }
 
 impl ViewNode for RowView {
-    fn render(&self, stdout: &mut Vec<Vec<Character>>, bounds: &Bounds) -> Result<()> {
+    fn render(&self, stdout: &mut ScreenBuffer, bounds: &Bounds) -> Result<()> {
         let len = self.children.len();
         let offset = bounds.size.0 / len as u16;
 
@@ -207,8 +247,11 @@ where
     pub fn run(&self) -> Result<()> {
         let mut stdout = stdout();
         let mut model = self.init.clone();
-        let mut old_buffer: Vec<Vec<Character>> =
-            vec![vec![Character::default(); self.size.0 as usize]; self.size.1 as usize];
+        let mut old_buffer = ScreenBuffer::new(
+            self.size.0 as usize,
+            self.size.1 as usize,
+            Character::default(),
+        );
 
         queue!(
             stdout,
@@ -220,8 +263,11 @@ where
 
         loop {
             let view = (self.view)(&model);
-            let mut new_buffer: Vec<Vec<Character>> =
-                vec![vec![Character::default(); self.size.0 as usize]; self.size.1 as usize];
+            let mut new_buffer = ScreenBuffer::new(
+                self.size.0 as usize,
+                self.size.1 as usize,
+                Character::default(),
+            );
 
             view.render(
                 &mut new_buffer,
@@ -231,12 +277,7 @@ where
                 },
             )?;
 
-            for (i, (new, old)) in new_buffer
-                .iter()
-                .flatten()
-                .zip(old_buffer.iter().flatten())
-                .enumerate()
-            {
+            for (i, (new, old)) in new_buffer.iter().zip(old_buffer.iter()).enumerate() {
                 if new != old {
                     let y = i as u16 / self.size.0;
                     let x = i as u16 % self.size.0;
