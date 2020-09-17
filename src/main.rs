@@ -9,15 +9,19 @@ struct Model(u32);
 #[derive(Debug)]
 enum Msg {
     None,
-    Increment,
-    Decrement,
+    KeyPressed(KeyEvent),
 }
 
 fn update(msg: Msg, model: &Model) -> Model {
     match msg {
-        Msg::Increment => Model(model.0 + 1),
-        Msg::Decrement => Model(model.0 - 1),
-        Msg::None => Model(model.0),
+        Msg::KeyPressed(KeyEvent {
+            code: KeyCode::Up, ..
+        }) => Model(model.0 + 1),
+        Msg::KeyPressed(KeyEvent {
+            code: KeyCode::Down,
+            ..
+        }) => Model(model.0 - 1),
+        Msg::KeyPressed(_) | Msg::None => Model(model.0),
     }
 }
 
@@ -46,21 +50,13 @@ fn view(model: &Model) -> View<Msg> {
                 View::<Msg>::new()
                     .style(Style {
                         color: Some(Color::Red),
+                        background_color: Some(Color::Blue),
                         ..Default::default()
                     })
                     .child(TextView::new(format!("{}", model.0))),
             ),
         ]))
-        .on_key_press(|e| match e {
-            KeyEvent {
-                code: KeyCode::Up, ..
-            } => Msg::Increment,
-            KeyEvent {
-                code: KeyCode::Down,
-                ..
-            } => Msg::Decrement,
-            _ => Msg::None,
-        })
+        .on_key_press(Msg::KeyPressed)
 }
 
 fn main() -> Result<()> {
