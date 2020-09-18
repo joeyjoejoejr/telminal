@@ -1,12 +1,13 @@
 use telminal::{
     event::{KeyCode, KeyEvent},
-    Color, Result, RowView, Style, Terminal, TextView, View,
+    tree::{Style, ViewNode},
+    Color, Result, Terminal,
 };
 
 #[derive(Clone)]
 struct Model(u32);
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 enum Msg {
     None,
     KeyPressed(KeyEvent),
@@ -25,38 +26,47 @@ fn update(msg: Msg, model: &Model) -> Model {
     }
 }
 
-fn view(model: &Model) -> View<Msg> {
-    View::new()
-        .style(Style {
+fn view(model: &Model) -> ViewNode<Msg> {
+    ViewNode::Container {
+        style: Style {
             color: Some(Color::Blue),
             background_color: Some(Color::White),
             ..Default::default()
-        })
-        .child(RowView::new(vec![
-            Box::new(View::<Msg>::new().style(Style {
-                background_color: Some(Color::Red),
-                ..Default::default()
-            })),
-            Box::new(
-                View::<Msg>::new()
-                    .style(Style {
-                        color: Some(Color::White),
-                        background_color: Some(Color::Green),
-                        ..Default::default()
-                    })
-                    .child(TextView::new(format!("{}", model.0))),
-            ),
-            Box::new(
-                View::<Msg>::new()
-                    .style(Style {
-                        color: Some(Color::Red),
-                        background_color: Some(Color::Blue),
-                        ..Default::default()
-                    })
-                    .child(TextView::new(format!("{}", model.0))),
-            ),
-        ]))
-        .on_key_press(Msg::KeyPressed)
+        },
+        on_key_press: Some(Msg::KeyPressed),
+        child: ViewNode::Row(vec![
+            ViewNode::Container {
+                style: Style {
+                    background_color: Some(Color::Red),
+                    ..Default::default()
+                },
+                child: ViewNode::None.boxed(),
+                on_key_press: None,
+            }
+            .boxed(),
+            ViewNode::Container {
+                style: Style {
+                    color: Some(Color::White),
+                    background_color: Some(Color::Green),
+                    ..Default::default()
+                },
+                child: ViewNode::Text(format!("{}", model.0)).boxed(),
+                on_key_press: None,
+            }
+            .boxed(),
+            ViewNode::Container {
+                style: Style {
+                    color: Some(Color::Red),
+                    background_color: Some(Color::Blue),
+                    ..Default::default()
+                },
+                child: ViewNode::Text(format!("{}", model.0)).boxed(),
+                on_key_press: None,
+            }
+            .boxed(),
+        ])
+        .boxed(),
+    }
 }
 
 fn main() -> Result<()> {

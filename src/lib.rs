@@ -1,3 +1,8 @@
+pub use crossterm::event;
+pub use crossterm::style::Color;
+mod screen;
+pub mod tree;
+
 use crossterm::{
     cursor,
     event::{Event, KeyCode, KeyEvent},
@@ -8,212 +13,18 @@ use crossterm::{
 use std::error::Error;
 use std::fmt::Debug;
 use std::io::{stdout, Write};
-use unicode_segmentation::UnicodeSegmentation;
 
-pub use crossterm::event;
-pub use crossterm::style::Color;
+use screen::{Character, ScreenBuffer};
+use tree::{render, Bounds, ViewNode};
 
 pub type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
-pub struct ScreenBuffer {
-    width: usize,
-    height: usize,
-    data: Vec<Character>,
-}
-
-impl std::ops::Index<(usize, usize)> for ScreenBuffer {
-    type Output = Character;
-
-    fn index(&self, idx: (usize, usize)) -> &Self::Output {
-        let (col, row) = idx;
-        assert!(col < self.width);
-        assert!(row < self.height);
-        &self.data[row * self.width + col]
-    }
-}
-
-impl std::ops::IndexMut<(usize, usize)> for ScreenBuffer {
-    fn index_mut(&mut self, idx: (usize, usize)) -> &mut Self::Output {
-        let (col, row) = idx;
-        assert!(col < self.width);
-        assert!(row < self.height);
-        &mut self.data[row * self.width + col]
-    }
-}
-
-impl ScreenBuffer {
-    pub fn new(width: usize, height: usize, default: Character) -> Self {
-        Self {
-            width,
-            height,
-            data: vec![default; width * height],
-        }
-    }
-
-    pub fn iter(&self) -> std::slice::Iter<Character> {
-        self.data.iter()
-    }
-}
-
-#[derive(Debug, Eq, PartialEq, Clone)]
-pub struct Character {
-    foreground_color: Color,
-    background_color: Color,
-    character: String,
-}
-
-impl Default for Character {
-    fn default() -> Self {
-        Self {
-            foreground_color: Color::Reset,
-            background_color: Color::Reset,
-            character: String::from(" "),
-        }
-    }
-}
-
-pub trait ViewNode: Debug {
-    fn render(&self, stdout: &mut ScreenBuffer, bounds: &Bounds) -> Result<()>;
-    fn style(&self) -> Style {
-        Style::default()
-    }
-}
-
-#[derive(Debug, Default, Clone, Copy)]
-pub struct Style {
-    pub color: Option<Color>,
-    pub background_color: Option<Color>,
-}
-
-#[derive(Debug, Default, Clone, Copy)]
-pub struct Bounds {
-    origin: (u16, u16),
-    size: (u16, u16),
-}
-
-#[derive(Debug)]
-pub struct View<Msg: Debug> {
-    child: Option<Box<dyn ViewNode>>,
-    on_key_press: Option<fn(KeyEvent) -> Msg>,
-    style: Style,
-}
-
-impl<Msg> View<Msg>
-where
-    Msg: Debug,
-{
-    pub fn new() -> Self {
-        View {
-            child: None,
-            on_key_press: None,
-            style: Style::default(),
-        }
-    }
-
-    pub fn child<T: ViewNode + 'static>(mut self, child: T) -> Self {
-        self.child.replace(Box::new(child));
-        self
-    }
-
-    pub fn on_key_press(mut self, cb: fn(KeyEvent) -> Msg) -> Self {
-        self.on_key_press.replace(cb);
-        self
-    }
-
-    pub fn style(mut self, style: Style) -> Self {
-        self.style = style;
-        self
-    }
-}
-
-impl<Msg> ViewNode for View<Msg>
-where
-    Msg: Debug,
-{
-    fn render(&self, stdout: &mut ScreenBuffer, bounds: &Bounds) -> Result<()> {
-        let foreground_color = self.style.color;
-        let background_color = self.style.background_color;
-        let (origin_x, origin_y) = bounds.origin;
-        let (size_x, size_y) = bounds.size;
-
-        for y in origin_y..origin_y + size_y {
-            for x in origin_x..origin_x + size_x {
-                let character = &mut stdout[(x as usize, y as usize)];
-                foreground_color.map(|c| character.foreground_color = c);
-                background_color.map(|c| character.background_color = c);
-                character.character = String::from(" ");
-            }
-        }
-
-        if let Some(ref child) = self.child {
-            child.render(stdout, bounds)?;
-        }
-        Ok(())
-    }
-
-    fn style(&self) -> Style {
-        self.style
-    }
-}
-
-#[derive(Debug)]
-pub struct TextView {
-    pub text: String,
-}
-
-impl TextView {
-    pub fn new(text: String) -> Self {
-        Self { text }
-    }
-}
-
-impl ViewNode for TextView {
-    fn render(&self, stdout: &mut ScreenBuffer, bounds: &Bounds) -> Result<()> {
-        let (x, y) = bounds.origin;
-
-        for (i, char) in self.text.graphemes(true).enumerate() {
-            let character = &mut stdout[(x as usize + i, y as usize)];
-            character.character = String::from(char);
-        }
-        Ok(())
-    }
-}
-
-#[derive(Debug)]
-pub struct RowView {
-    children: Vec<Box<dyn ViewNode>>,
-}
-
-impl RowView {
-    pub fn new(children: Vec<Box<dyn ViewNode>>) -> Self {
-        Self { children }
-    }
-}
-
-impl ViewNode for RowView {
-    fn render(&self, stdout: &mut ScreenBuffer, bounds: &Bounds) -> Result<()> {
-        let len = self.children.len();
-        let offset = bounds.size.0 / len as u16;
-
-        for (i, child) in self.children.iter().enumerate() {
-            let mut origin = bounds.origin;
-            let mut size = bounds.size;
-            origin.0 = offset * i as u16;
-            size.0 = size.0 - offset * i as u16;
-            let child_bounds = Bounds { origin, size };
-            child.render(stdout, &child_bounds)?;
-        }
-
-        Ok(())
-    }
-}
-
 type UpdateFn<Msg, Model> = fn(Msg, &Model) -> Model;
-type ViewFn<Msg, Model> = fn(&Model) -> View<Msg>;
+type ViewFn<Msg, Model> = fn(&Model) -> ViewNode<Msg>;
 
 pub struct Terminal<Model, Msg>
 where
-    Msg: Debug,
+    Msg: Debug + PartialEq,
 {
     init: Model,
     update: UpdateFn<Msg, Model>,
@@ -224,7 +35,7 @@ where
 impl<Model, Msg> Terminal<Model, Msg>
 where
     Model: Clone,
-    Msg: Debug,
+    Msg: Debug + PartialEq,
 {
     pub fn new(
         init: Model,
@@ -252,6 +63,10 @@ where
             self.size.1 as usize,
             Character::default(),
         );
+        let bounds = Bounds {
+            origin: (0, 0),
+            size: self.size,
+        };
 
         queue!(
             stdout,
@@ -263,19 +78,9 @@ where
 
         loop {
             let view = (self.view)(&model);
-            let mut new_buffer = ScreenBuffer::new(
-                self.size.0 as usize,
-                self.size.1 as usize,
-                Character::default(),
-            );
+            let mut new_buffer = old_buffer.clone();
 
-            view.render(
-                &mut new_buffer,
-                &Bounds {
-                    origin: (0, 0),
-                    size: self.size,
-                },
-            )?;
+            render(&view, &mut new_buffer, &bounds)?;
 
             for (i, (new, old)) in new_buffer.iter().zip(old_buffer.iter()).enumerate() {
                 if new != old {
@@ -300,7 +105,11 @@ where
                     ..
                 }) => break Ok(()),
                 Event::Key(event) => {
-                    if let Some(key_press) = view.on_key_press {
+                    if let ViewNode::Container {
+                        on_key_press: Some(key_press),
+                        ..
+                    } = view
+                    {
                         let message = (key_press)(event);
                         model = (self.update)(message, &model);
                     }
@@ -313,7 +122,7 @@ where
 
 impl<Model, Msg> Drop for Terminal<Model, Msg>
 where
-    Msg: Debug,
+    Msg: Debug + PartialEq,
 {
     fn drop(&mut self) {
         let mut stdout = stdout();
