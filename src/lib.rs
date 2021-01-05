@@ -1,3 +1,4 @@
+#![recursion_limit = "1024"]
 pub use crossterm::event;
 pub use crossterm::style::Color;
 mod screen;
@@ -5,11 +6,12 @@ pub mod tree;
 
 use crossterm::{
     cursor,
-    event::{Event, KeyCode, KeyEvent},
+    event::{Event, EventStream, KeyCode, KeyEvent},
     execute, queue,
     style::{self, Print},
     terminal::{self, ClearType},
 };
+use futures::{future::FutureExt, select, stream::BoxStream, StreamExt};
 use std::error::Error;
 use std::fmt::Debug;
 use std::io::{stdout, Write};
@@ -18,30 +20,18 @@ use screen::{Character, ScreenBuffer};
 use tree::{render, Bounds, ViewNode};
 
 pub type Result<T> = std::result::Result<T, Box<dyn Error>>;
+pub type Sub<Msg> = BoxStream<'static, Msg>;
 
-type UpdateFn<Msg, Model> = fn(Msg, &Model) -> Model;
-type ViewFn<Msg, Model> = fn(&Model) -> ViewNode<Msg>;
-
-pub struct Terminal<Model, Msg>
-where
-    Msg: Debug + PartialEq,
-{
+pub struct Terminal<Model, View, Update, Subscription> {
     init: Model,
-    update: UpdateFn<Msg, Model>,
-    view: ViewFn<Msg, Model>,
+    update: Update,
+    view: View,
+    subscriptions: Subscription,
     size: (u16, u16),
 }
 
-impl<Model, Msg> Terminal<Model, Msg>
-where
-    Model: Clone,
-    Msg: Debug + PartialEq,
-{
-    pub fn new(
-        init: Model,
-        update: UpdateFn<Msg, Model>,
-        view: ViewFn<Msg, Model>,
-    ) -> Result<Self> {
+impl<M, V, U, S> Terminal<M, V, U, S> {
+    pub fn new(init: M, update: U, view: V, subscriptions: S) -> Result<Self> {
         let mut stdout = stdout();
         execute!(stdout, terminal::EnterAlternateScreen)?;
         terminal::enable_raw_mode()?;
@@ -51,11 +41,34 @@ where
             init,
             update,
             view,
+            subscriptions,
             size,
         })
     }
 
-    pub fn run(&self) -> Result<()> {
+    pub fn run<Msg>(&self) -> Result<()>
+    where
+        Msg: Debug + PartialEq,
+        M: Clone,
+        V: Fn(&M) -> ViewNode<Msg>,
+        U: Fn(Msg, &M) -> M,
+        S: Fn(&M) -> Sub<Msg>,
+    {
+        let rt = tokio::runtime::Runtime::new()?;
+        rt.block_on(self._run())?;
+        Ok(())
+    }
+
+    async fn _run<Msg>(&self) -> Result<()>
+    where
+        Msg: Debug + PartialEq,
+        M: Clone,
+        V: Fn(&M) -> ViewNode<Msg>,
+        U: Fn(Msg, &M) -> M,
+        S: Fn(&M) -> Sub<Msg>,
+    {
+        let mut reader = EventStream::new();
+        let mut subscriptions = (self.subscriptions)(&self.init);
         let mut stdout = stdout();
         let mut model = self.init.clone();
         let mut old_buffer = ScreenBuffer::new(
@@ -79,6 +92,8 @@ where
         loop {
             let view = (self.view)(&model);
             let mut new_buffer = old_buffer.clone();
+            let mut event = reader.next().fuse();
+            let mut sub = subscriptions.next().fuse();
 
             render(&view, &mut new_buffer, &bounds)?;
 
@@ -99,31 +114,36 @@ where
 
             old_buffer = new_buffer;
 
-            match event::read()? {
-                Event::Key(KeyEvent {
-                    code: KeyCode::Char('q'),
-                    ..
-                }) => break Ok(()),
-                Event::Key(event) => {
-                    if let ViewNode::Container {
-                        on_key_press: Some(key_press),
-                        ..
-                    } = view
-                    {
-                        let message = (key_press)(event);
-                        model = (self.update)(message, &model);
+            select! {
+                maybe_event = event => {
+                    if let Some(Ok(event)) = maybe_event {
+                        match event {
+                            Event::Key(KeyEvent { code: KeyCode::Char('q'), .. }) => break Ok(()),
+                            Event::Key(event) => {
+                                if let ViewNode::Container {
+                                    on_key_press: Some(key_press),
+                                    ..
+                                } = view
+                                {
+                                    let message = (key_press)(event);
+                                    model = (self.update)(message, &model);
+                                }
+                            }
+                            _ => {}
+                        }
                     }
                 }
-                _ => {}
+                maybe_sub = sub => {
+                    if let Some(message) = maybe_sub {
+                         model = (self.update)(message, &model);
+                    }
+                }
             }
         }
     }
 }
 
-impl<Model, Msg> Drop for Terminal<Model, Msg>
-where
-    Msg: Debug + PartialEq,
-{
+impl<M, V, U, S> Drop for Terminal<M, V, U, S> {
     fn drop(&mut self) {
         let mut stdout = stdout();
         execute!(

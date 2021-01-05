@@ -17,13 +17,13 @@ pub struct Style {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ViewNode<Msg: PartialEq + Debug> {
-    Column(Vec<Box<ViewNode<Msg>>>),
+    Column(Vec<ViewNode<Msg>>),
     Container {
         child: Box<ViewNode<Msg>>,
         style: Style,
         on_key_press: Option<fn(KeyEvent) -> Msg>,
     },
-    Row(Vec<Box<ViewNode<Msg>>>),
+    Row(Vec<ViewNode<Msg>>),
     Text(String),
     None,
 }
@@ -65,15 +65,15 @@ fn render_text(text: &str, screen: &mut ScreenBuffer, bounds: &Bounds) -> Result
 }
 
 fn render_column<Msg: PartialEq + Debug>(
-    column: &Vec<Box<ViewNode<Msg>>>,
-    screen: &mut ScreenBuffer,
-    bounds: &Bounds,
+    _column: &[ViewNode<Msg>],
+    _screen: &mut ScreenBuffer,
+    _bounds: &Bounds,
 ) -> Result<()> {
     Ok(())
 }
 
 fn render_row<Msg: PartialEq + Debug>(
-    rows: &Vec<Box<ViewNode<Msg>>>,
+    rows: &[ViewNode<Msg>],
     screen: &mut ScreenBuffer,
     bounds: &Bounds,
 ) -> Result<()> {
@@ -84,7 +84,7 @@ fn render_row<Msg: PartialEq + Debug>(
         let mut origin = bounds.origin;
         let mut size = bounds.size;
         origin.0 = offset * i as u16;
-        size.0 = size.0 - offset * i as u16;
+        size.0 -= offset * i as u16;
         let child_bounds = Bounds { origin, size };
 
         render(row, screen, &child_bounds)?;
@@ -98,7 +98,6 @@ fn render_container<Msg: PartialEq + Debug>(
     bounds: &Bounds,
 ) -> Result<()> {
     if let ViewNode::Container { child, style, .. } = container {
-        let default_style = Style::default();
         let foreground_color = style.color;
         let background_color = style.background_color;
         let (origin_x, origin_y) = bounds.origin;
@@ -107,8 +106,12 @@ fn render_container<Msg: PartialEq + Debug>(
         for y in origin_y..origin_y + size_y {
             for x in origin_x..origin_x + size_x {
                 let character = &mut screen[(x as usize, y as usize)];
-                foreground_color.map(|c| character.foreground_color = c);
-                background_color.map(|c| character.background_color = c);
+                if let Some(c) = foreground_color {
+                    character.foreground_color = c;
+                }
+                if let Some(c) = background_color {
+                    character.background_color = c;
+                }
                 character.character = String::from(" ");
             }
         }
